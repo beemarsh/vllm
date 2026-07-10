@@ -11,6 +11,8 @@ from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, wraps
 from typing import TYPE_CHECKING, TypeVar
+import vllm.envs as envs
+
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -182,6 +184,15 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if envs.VLLM_DIST_BACKEND == "mpi":
+            cls.dist_backend = "mpi"
+            model_config = vllm_config.model_config
+            if model_config is not None and not model_config.enforce_eager:
+                logger.info(
+                    "VLLM_DIST_BACKEND=mpi: forcing enforce_eager=True "
+                    "(MPI collectives are not CUDA-graph capturable)."
+                )
+            model_config.enforce_eager = True
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
@@ -403,9 +414,11 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
+        if envs.VLLM_DIST_BACKEND == "mpi":
+          return "vllm.distributed.device_communicators.mpi_communicator.MPICommunicator"  # noqa
         return (
-            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
-        )
+          "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+      )
 
     @classmethod
     def supports_fp8(cls) -> bool:
