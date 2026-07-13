@@ -1410,6 +1410,11 @@ def init_distributed_environment(
             "distributed environment"
         )
         if not torch.distributed.is_backend_available(backend):
+            if str(backend).lower() == "mpi":
+                raise RuntimeError(
+                    "VLLM_DIST_BACKEND=mpi requires a PyTorch build with "
+                    "ProcessGroupMPI available."
+                )
             logger.warning(
                 "Distributed backend %s is not available; falling back to gloo.",
                 backend,

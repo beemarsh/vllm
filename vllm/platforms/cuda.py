@@ -11,8 +11,6 @@ from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, wraps
 from typing import TYPE_CHECKING, TypeVar
-import vllm.envs as envs
-
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -22,6 +20,7 @@ from typing_extensions import ParamSpec
 # import custom ops, trigger op registration
 import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -184,17 +183,24 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if envs.VLLM_DIST_BACKEND == "mpi":
-            cls.dist_backend = "mpi"
-            model_config = vllm_config.model_config
-            if model_config is not None and not model_config.enforce_eager:
-                logger.info(
-                    "VLLM_DIST_BACKEND=mpi: forcing enforce_eager=True "
-                    "(MPI collectives are not CUDA-graph capturable)."
-                )
-            model_config.enforce_eager = True
+        cls.dist_backend = envs.VLLM_DIST_BACKEND
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
+
+        if cls.dist_backend == "mpi":
+            from vllm.config.compilation import CUDAGraphMode, CompilationMode
+
+            vllm_config.compilation_config.mode = CompilationMode.NONE
+            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            vllm_config.compilation_config.max_cudagraph_capture_size = 0
+            vllm_config.compilation_config.cudagraph_capture_sizes = []
+            if model_config is not None:
+                if not model_config.enforce_eager:
+                    logger.info(
+                        "VLLM_DIST_BACKEND=mpi: forcing enforce_eager=True "
+                        "(MPI collectives are not CUDA-graph capturable)."
+                    )
+                model_config.enforce_eager = True
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -415,10 +421,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         if envs.VLLM_DIST_BACKEND == "mpi":
-          return "vllm.distributed.device_communicators.mpi_communicator.MPICommunicator"  # noqa
+            return "vllm.distributed.device_communicators.mpi_communicator.MPICommunicator"  # noqa
         return (
-          "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
-      )
+            "vllm.distributed.device_communicators.cuda_communicator.CudaCommunicator"  # noqa
+        )
 
     @classmethod
     def supports_fp8(cls) -> bool:
@@ -426,7 +432,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        return True
+        return envs.VLLM_DIST_BACKEND != "mpi"
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
@@ -445,6 +451,12 @@ class CudaPlatformBase(Platform):
         group_size: int,
         timeout: timedelta,
     ) -> ProcessGroup:
+        if str(backend).lower() == "mpi":
+            raise NotImplementedError(
+                "Stateless MPI process groups are not supported. "
+                "PyTorch ProcessGroupMPI should be created through "
+                "init_process_group/new_group in an MPI-launched world."
+            )
         assert is_nccl_available()
         pg: ProcessGroup = ProcessGroup(
             prefix_store,
@@ -522,7 +534,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        return True
+        return envs.VLLM_DIST_BACKEND != "mpi"
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
@@ -535,7 +547,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        return True
+        return envs.VLLM_DIST_BACKEND != "mpi"
 
 
 # NVML utils
