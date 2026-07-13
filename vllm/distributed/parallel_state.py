@@ -334,15 +334,16 @@ class GroupCoordinator:
 
         self_device_group = None
         self_cpu_group = None
+        cpu_backend = _cpu_group_backend(torch_distributed_backend)
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
                 ranks, backend=torch_distributed_backend
             )
-            # a group with `gloo` backend, to allow direct coordination between
-            # processes through the CPU.
+            # A CPU-capable group for direct coordination between processes.
+            # For NCCL this is Gloo; for MPI this is MPI itself.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                cpu_group = torch.distributed.new_group(ranks, backend=cpu_backend)
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1305,6 +1306,20 @@ logger = init_logger(__name__)
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
 
+def _is_mpi_backend(backend: str | Backend) -> bool:
+    return str(backend).lower() == "mpi"
+
+
+def _cpu_group_backend(backend: str | Backend) -> str | Backend:
+    # vLLM keeps a second process group for CPU tensors, object broadcasts,
+    # barriers, and topology checks. NCCL cannot serve that role, so the
+    # normal CUDA path uses Gloo. MPI can serve that role directly, and some
+    # MPI-enabled PyTorch builds do not compile Gloo at all.
+    if _is_mpi_backend(backend):
+        return backend
+    return "gloo"
+
+
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
@@ -1410,7 +1425,7 @@ def init_distributed_environment(
             "distributed environment"
         )
         if not torch.distributed.is_backend_available(backend):
-            if str(backend).lower() == "mpi":
+            if _is_mpi_backend(backend):
                 raise RuntimeError(
                     "VLLM_DIST_BACKEND=mpi requires a PyTorch build with "
                     "ProcessGroupMPI available."
@@ -1433,7 +1448,7 @@ def init_distributed_environment(
         )
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
-                backend="gloo", timeout=timeout
+                backend=_cpu_group_backend(backend), timeout=timeout
             )
             if _node_count(tp_pp_cpu_group) > 1:
                 # NOTE(yongji): StatelessGroupCoordinator uses data_parallel_master_ip
