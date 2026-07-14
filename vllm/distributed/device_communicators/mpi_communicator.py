@@ -18,6 +18,28 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _mutable_empty(
+    size: torch.Size | tuple[int, ...],
+    *,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> torch.Tensor:
+    with torch.inference_mode(False), torch.no_grad():
+        return torch.empty(size, dtype=dtype, device=device)
+
+
+def _mutable_empty_like(tensor: torch.Tensor) -> torch.Tensor:
+    with torch.inference_mode(False), torch.no_grad():
+        return torch.empty_like(tensor)
+
+
+def _mutable_clone(tensor: torch.Tensor) -> torch.Tensor:
+    with torch.inference_mode(False), torch.no_grad():
+        output = torch.empty_like(tensor)
+        output.copy_(tensor)
+    return output
+
+
 class MPICommunicator(DeviceCommunicatorBase):
     def __init__(
         self,
@@ -72,7 +94,7 @@ class MPICommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        output = input_.clone()
+        output = _mutable_clone(input_.contiguous())
         dist.all_reduce(output, group=self.device_group)
         return output
 
@@ -85,7 +107,7 @@ class MPICommunicator(DeviceCommunicatorBase):
         if dim < 0:
             dim += input_.dim()
         input_ = input_.contiguous()
-        gather_list = [torch.empty_like(input_) for _ in range(self.world_size)]
+        gather_list = [_mutable_empty_like(input_) for _ in range(self.world_size)]
         dist.all_gather(gather_list, input_, group=self.device_group)
         return torch.cat(gather_list, dim=dim).contiguous()
 
@@ -115,7 +137,7 @@ class MPICommunicator(DeviceCommunicatorBase):
                 f"{tensor.shape[0]} != {sizes_[self.rank_in_group]}"
             )
             gather_list = [
-                torch.empty(
+                _mutable_empty(
                     (size,) + tensor.shape[1:],
                     dtype=tensor.dtype,
                     device=tensor.device,
@@ -143,7 +165,7 @@ class MPICommunicator(DeviceCommunicatorBase):
         assert input_tensor.shape[0] % self.world_size == 0
         chunk_size = input_tensor.shape[0] // self.world_size
 
-        reduced = input_tensor.clone()
+        reduced = _mutable_clone(input_tensor)
         dist.all_reduce(reduced, group=self.device_group)
 
         start = self.rank_in_group * chunk_size
@@ -173,7 +195,7 @@ class MPICommunicator(DeviceCommunicatorBase):
             assert len(sizes) == self.world_size
             assert input_tensor.shape[0] == sum(sizes)
 
-        reduced = input_tensor.clone()
+        reduced = _mutable_clone(input_tensor)
         dist.all_reduce(reduced, group=self.device_group)
 
         start = sum(sizes[: self.rank_in_group])
@@ -194,7 +216,7 @@ class MPICommunicator(DeviceCommunicatorBase):
             dim += input_.dim()
 
         if self.rank_in_group == dst:
-            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+            gather_list = [_mutable_empty_like(input_) for _ in range(world_size)]
         else:
             gather_list = None
         dist.gather(input_, gather_list, dst=self.ranks[dst], group=self.device_group)
@@ -211,14 +233,14 @@ class MPICommunicator(DeviceCommunicatorBase):
         if src is None:
             src = (self.rank_in_group - 1) % self.world_size
 
-        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        tensor = _mutable_empty(size, dtype=dtype, device=self.device)
         dist.recv(tensor, self.ranks[src], self.device_group)
         return tensor
 
     def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
         if self.world_size == 1:
             return tensor
-        output = tensor.clone()
+        output = _mutable_clone(tensor)
         dist.broadcast(output, self.ranks[src], self.device_group)
         return output
 

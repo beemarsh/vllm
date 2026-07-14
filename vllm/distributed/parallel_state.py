@@ -468,16 +468,13 @@ class GroupCoordinator:
         else:
             stream = graph_capture_context.stream
 
-        # only cuda uses this function,
-        # so we don't abstract it into the base class
+        # Some CUDA-backed communicators have an extra custom-allreduce capture
+        # context. Communicators without one still participate in the regular
+        # CUDA stream capture below.
         maybe_ca_context = nullcontext()
-        from vllm.distributed.device_communicators.cuda_communicator import (
-            CudaCommunicator,
-        )
 
         if self.device_communicator is not None:
-            assert isinstance(self.device_communicator, CudaCommunicator)
-            ca_comm = self.device_communicator.ca_comm
+            ca_comm = getattr(self.device_communicator, "ca_comm", None)
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 

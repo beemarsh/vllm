@@ -28,8 +28,6 @@ def get_fake_args_from_graph(graph: fx.GraphModule) -> list[Any]:
     for node in graph.graph.nodes:
         if node.op == "placeholder":
             fake_args.append(node.meta["example_value"])
-        else:
-            break
     return fake_args
 
 
@@ -56,7 +54,7 @@ def create_concrete_args(graph: fx.GraphModule, size: int) -> list[Any]:
     with fake_mode:
         for node in graph.graph.nodes:
             if node.op != "placeholder":
-                break
+                continue
             val = node.meta["example_value"]
             if isinstance(val, torch.SymInt):
                 args.append(concretize(val))
@@ -341,15 +339,13 @@ class PiecewiseBackend:
         # First we try to find the range entry for the concrete compile size
         # If not found, we search for the range entry
         # that contains the runtime shape.
-        if self.compile_sizes is None:
-            return None
-
-        if runtime_shape in self.compile_sizes:
+        if self.compile_sizes is not None and runtime_shape in self.compile_sizes:
             return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
-        else:
-            for range in self.compile_ranges:
-                if runtime_shape in range:
-                    return self.range_entries[range]
+
+        for range in self.compile_ranges:
+            if runtime_shape in range:
+                return self.range_entries[range]
+
         return None
 
     def __call__(self, *args: Any) -> Any:

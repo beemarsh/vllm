@@ -187,20 +187,20 @@ class CudaPlatformBase(Platform):
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
-        if cls.dist_backend == "mpi":
-            from vllm.config.compilation import CUDAGraphMode, CompilationMode
+        # if cls.dist_backend == "mpi":
+        #     from vllm.config.compilation import CUDAGraphMode, CompilationMode
 
-            vllm_config.compilation_config.mode = CompilationMode.NONE
-            vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            vllm_config.compilation_config.max_cudagraph_capture_size = 0
-            vllm_config.compilation_config.cudagraph_capture_sizes = []
-            if model_config is not None:
-                if not model_config.enforce_eager:
-                    logger.info(
-                        "VLLM_DIST_BACKEND=mpi: forcing enforce_eager=True "
-                        "(MPI collectives are not CUDA-graph capturable)."
-                    )
-                model_config.enforce_eager = True
+        #     vllm_config.compilation_config.mode = CompilationMode.NONE
+        #     vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        #     vllm_config.compilation_config.max_cudagraph_capture_size = 0
+        #     vllm_config.compilation_config.cudagraph_capture_sizes = []
+        #     if model_config is not None:
+        #         if not model_config.enforce_eager:
+        #             logger.info(
+        #                 "VLLM_DIST_BACKEND=mpi: forcing enforce_eager=True "
+        #                 "(MPI collectives are not CUDA-graph capturable)."
+        #             )
+        #         model_config.enforce_eager = True
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
@@ -534,7 +534,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        return envs.VLLM_DIST_BACKEND != "mpi"
+        return True
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
@@ -547,7 +547,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def use_custom_op_collectives(cls) -> bool:
-        return envs.VLLM_DIST_BACKEND != "mpi"
+        return True
 
 
 # NVML utils
