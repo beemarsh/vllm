@@ -72,7 +72,7 @@ class MPICommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        output = input_.contiguous().clone()
+        output = input_.clone()
         dist.all_reduce(output, group=self.device_group)
         return output
 
@@ -179,6 +179,48 @@ class MPICommunicator(DeviceCommunicatorBase):
         start = sum(sizes[: self.rank_in_group])
         output = reduced.narrow(0, start, sizes[self.rank_in_group]).contiguous()
         return output.movedim(0, dim).contiguous()
+
+    def gather(
+        self,
+        input_: torch.Tensor,
+        dst: int = 0,
+        dim: int = -1,
+    ) -> torch.Tensor | None:
+        world_size = self.world_size
+        assert -input_.dim() <= dim < input_.dim(), (
+            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
+        )
+        if dim < 0:
+            dim += input_.dim()
+
+        if self.rank_in_group == dst:
+            gather_list = [torch.empty_like(input_) for _ in range(world_size)]
+        else:
+            gather_list = None
+        dist.gather(input_, gather_list, dst=self.ranks[dst], group=self.device_group)
+        if self.rank_in_group == dst:
+            return torch.cat(gather_list, dim=dim)
+        return None
+
+    def recv(
+        self,
+        size: torch.Size,
+        dtype: torch.dtype,
+        src: int | None = None,
+    ) -> torch.Tensor:
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        dist.recv(tensor, self.ranks[src], self.device_group)
+        return tensor
+
+    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
+        if self.world_size == 1:
+            return tensor
+        output = tensor.clone()
+        dist.broadcast(output, self.ranks[src], self.device_group)
+        return output
 
     def dispatch_router_logits(
         self,
