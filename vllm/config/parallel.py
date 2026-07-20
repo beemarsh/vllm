@@ -635,6 +635,17 @@ class ParallelConfig:
             * self.prefill_context_parallel_size
         )
 
+        if envs.VLLM_DIST_BACKEND == "mpi":
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "external_launcher"
+            elif self.distributed_executor_backend != "external_launcher":
+                raise ValueError(
+                    "VLLM_DIST_BACKEND=mpi requires "
+                    "distributed_executor_backend='external_launcher'. "
+                    "Launch one vLLM process per MPI rank and set RANK, "
+                    "LOCAL_RANK, WORLD_SIZE, MASTER_ADDR, and MASTER_PORT."
+                )
+
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
             self.world_size *= self.data_parallel_size

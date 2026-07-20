@@ -9,6 +9,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -28,6 +29,11 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+
+
+def _clear_envs_cache():
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
 
 
 def test_compile_config_repr_succeeds():
@@ -56,6 +62,38 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def test_mpi_backend_defaults_to_external_launcher(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_DIST_BACKEND", "mpi")
+    _clear_envs_cache()
+
+    try:
+        parallel_config = ParallelConfig(tensor_parallel_size=2)
+
+        assert parallel_config.distributed_executor_backend == "external_launcher"
+    finally:
+        _clear_envs_cache()
+
+
+def test_mpi_backend_rejects_non_external_launcher(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_DIST_BACKEND", "mpi")
+    _clear_envs_cache()
+
+    try:
+        with pytest.raises(
+            ValueError,
+            match="VLLM_DIST_BACKEND=mpi requires "
+            "distributed_executor_backend='external_launcher'",
+        ):
+            ParallelConfig(
+                tensor_parallel_size=2,
+                distributed_executor_backend="mp",
+            )
+    finally:
+        _clear_envs_cache()
 
 
 @dataclass
