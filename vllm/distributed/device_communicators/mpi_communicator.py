@@ -135,6 +135,13 @@ class MPICommunicator(DeviceCommunicatorBase):
             return input_
         output = input_.contiguous().clone()
         self._log_cuda_capture_collective("all_reduce", "before", output)
+        if output.is_cuda and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "MPICommunicator.all_reduce was called during CUDA graph "
+                f"capture for group={self.unique_name}, "
+                f"rank={self.rank_in_group}, shape={tuple(output.shape)}, "
+                f"dtype={output.dtype}."
+            )
         dist.all_reduce(output, group=self.device_group)
         self._log_cuda_capture_collective("all_reduce", "after", output)
         return output
