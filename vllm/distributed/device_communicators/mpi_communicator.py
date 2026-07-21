@@ -18,7 +18,15 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def _mutable_empty(
+def _normal_empty_like(tensor: torch.Tensor) -> torch.Tensor:
+    # vLLM warmup/profile can run under torch.inference_mode(). ProcessGroupMPI
+    # mutates all_gather output tensors during work.wait(), so those destination
+    # tensors must not be inference tensors.
+    with torch.inference_mode(False), torch.no_grad():
+        return torch.empty_like(tensor)
+
+
+def _normal_empty(
     size: torch.Size | tuple[int, ...],
     *,
     dtype: torch.dtype,
@@ -28,16 +36,19 @@ def _mutable_empty(
         return torch.empty(size, dtype=dtype, device=device)
 
 
-def _mutable_empty_like(tensor: torch.Tensor) -> torch.Tensor:
-    with torch.inference_mode(False), torch.no_grad():
-        return torch.empty_like(tensor)
+def _is_inference_tensor(tensor: torch.Tensor) -> bool | str:
+    is_inference = getattr(tensor, "is_inference", None)
+    if is_inference is None:
+        return "unknown"
+    return bool(is_inference())
 
 
-def _mutable_clone(tensor: torch.Tensor) -> torch.Tensor:
-    with torch.inference_mode(False), torch.no_grad():
-        output = torch.empty_like(tensor)
-        output.copy_(tensor)
-    return output
+def _tensor_summary(tensor: torch.Tensor) -> str:
+    return (
+        f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+        f"device={tensor.device} contiguous={tensor.is_contiguous()} "
+        f"inference={_is_inference_tensor(tensor)}"
+    )
 
 
 class MPICommunicator(DeviceCommunicatorBase):
@@ -61,9 +72,37 @@ class MPICommunicator(DeviceCommunicatorBase):
         # Defensive: any code probing for these should see "not available".
         self.pynccl_comm = None
         self.ca_comm = None
+        self._cuda_capture_debug_counter = 0
 
         if self.use_all2all:
             self.all2all_manager = self._init_all2all_manager()
+
+    def _log_cuda_capture_collective(
+        self,
+        op_name: str,
+        stage: str,
+        *tensors: torch.Tensor,
+    ) -> None:
+        if not tensors or not any(tensor.is_cuda for tensor in tensors):
+            return
+        try:
+            capturing = torch.cuda.is_current_stream_capturing()
+        except RuntimeError:
+            return
+        if not capturing:
+            return
+        if stage == "before":
+            self._cuda_capture_debug_counter += 1
+        tensor_info = "; ".join(_tensor_summary(tensor) for tensor in tensors[:2])
+        logger.error(
+            "[MPI CG DEBUG] %s #%d %s rank=%d group=%s %s",
+            op_name,
+            self._cuda_capture_debug_counter,
+            stage,
+            self.rank_in_group,
+            self.unique_name,
+            tensor_info,
+        )
 
     def _init_all2all_manager(self) -> All2AllManagerBase:
         if self.all2all_backend == "naive":
@@ -94,8 +133,10 @@ class MPICommunicator(DeviceCommunicatorBase):
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         if self.world_size == 1:
             return input_
-        output = _mutable_clone(input_.contiguous())
+        output = input_.contiguous().clone()
+        self._log_cuda_capture_collective("all_reduce", "before", output)
         dist.all_reduce(output, group=self.device_group)
+        self._log_cuda_capture_collective("all_reduce", "after", output)
         return output
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -107,8 +148,14 @@ class MPICommunicator(DeviceCommunicatorBase):
         if dim < 0:
             dim += input_.dim()
         input_ = input_.contiguous()
-        gather_list = [_mutable_empty_like(input_) for _ in range(self.world_size)]
+        gather_list = [_normal_empty_like(input_) for _ in range(self.world_size)]
+        self._log_cuda_capture_collective(
+            "all_gather", "before", input_, gather_list[0]
+        )
         dist.all_gather(gather_list, input_, group=self.device_group)
+        self._log_cuda_capture_collective(
+            "all_gather", "after", input_, gather_list[0]
+        )
         return torch.cat(gather_list, dim=dim).contiguous()
 
     def all_gatherv(
@@ -137,14 +184,20 @@ class MPICommunicator(DeviceCommunicatorBase):
                 f"{tensor.shape[0]} != {sizes_[self.rank_in_group]}"
             )
             gather_list = [
-                _mutable_empty(
+                _normal_empty(
                     (size,) + tensor.shape[1:],
                     dtype=tensor.dtype,
                     device=tensor.device,
                 )
                 for size in sizes_
             ]
+            self._log_cuda_capture_collective(
+                "all_gatherv", "before", tensor, gather_list[0]
+            )
             dist.all_gather(gather_list, tensor.contiguous(), group=self.device_group)
+            self._log_cuda_capture_collective(
+                "all_gatherv", "after", tensor, gather_list[0]
+            )
             return torch.cat(gather_list, dim=0).contiguous()
 
         if isinstance(input_, torch.Tensor):
@@ -165,8 +218,10 @@ class MPICommunicator(DeviceCommunicatorBase):
         assert input_tensor.shape[0] % self.world_size == 0
         chunk_size = input_tensor.shape[0] // self.world_size
 
-        reduced = _mutable_clone(input_tensor)
+        reduced = input_tensor.clone()
+        self._log_cuda_capture_collective("reduce_scatter", "before", reduced)
         dist.all_reduce(reduced, group=self.device_group)
+        self._log_cuda_capture_collective("reduce_scatter", "after", reduced)
 
         start = self.rank_in_group * chunk_size
         output = reduced.narrow(0, start, chunk_size).contiguous()
@@ -195,54 +250,14 @@ class MPICommunicator(DeviceCommunicatorBase):
             assert len(sizes) == self.world_size
             assert input_tensor.shape[0] == sum(sizes)
 
-        reduced = _mutable_clone(input_tensor)
+        reduced = input_tensor.clone()
+        self._log_cuda_capture_collective("reduce_scatterv", "before", reduced)
         dist.all_reduce(reduced, group=self.device_group)
+        self._log_cuda_capture_collective("reduce_scatterv", "after", reduced)
 
         start = sum(sizes[: self.rank_in_group])
         output = reduced.narrow(0, start, sizes[self.rank_in_group]).contiguous()
         return output.movedim(0, dim).contiguous()
-
-    def gather(
-        self,
-        input_: torch.Tensor,
-        dst: int = 0,
-        dim: int = -1,
-    ) -> torch.Tensor | None:
-        world_size = self.world_size
-        assert -input_.dim() <= dim < input_.dim(), (
-            f"Invalid dim ({dim}) for input tensor with shape {input_.size()}"
-        )
-        if dim < 0:
-            dim += input_.dim()
-
-        if self.rank_in_group == dst:
-            gather_list = [_mutable_empty_like(input_) for _ in range(world_size)]
-        else:
-            gather_list = None
-        dist.gather(input_, gather_list, dst=self.ranks[dst], group=self.device_group)
-        if self.rank_in_group == dst:
-            return torch.cat(gather_list, dim=dim)
-        return None
-
-    def recv(
-        self,
-        size: torch.Size,
-        dtype: torch.dtype,
-        src: int | None = None,
-    ) -> torch.Tensor:
-        if src is None:
-            src = (self.rank_in_group - 1) % self.world_size
-
-        tensor = _mutable_empty(size, dtype=dtype, device=self.device)
-        dist.recv(tensor, self.ranks[src], self.device_group)
-        return tensor
-
-    def broadcast(self, tensor: torch.Tensor, src: int = 0) -> torch.Tensor:
-        if self.world_size == 1:
-            return tensor
-        output = _mutable_clone(tensor)
-        dist.broadcast(output, self.ranks[src], self.device_group)
-        return output
 
     def dispatch_router_logits(
         self,

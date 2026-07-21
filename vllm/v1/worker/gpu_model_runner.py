@@ -5778,21 +5778,25 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
-        # Add `is_profile` here to pre-allocate communication buffers
-        hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
-        )
-        if get_pp_group().is_last_rank:
-            if self.is_pooling_model:
-                output = self._dummy_pooler_run(hidden_states)
+        try:
+            # Add `is_profile` here to pre-allocate communication buffers
+            hidden_states, last_hidden_states = self._dummy_run(
+                self.max_num_tokens, is_profile=True
+            )
+            if get_pp_group().is_last_rank:
+                if self.is_pooling_model:
+                    output = self._dummy_pooler_run(hidden_states)
+                else:
+                    output = self._dummy_sampler_run(last_hidden_states)
             else:
-                output = self._dummy_sampler_run(last_hidden_states)
-        else:
-            output = None
-        self._sync_device()
-        del hidden_states, output
-        self.encoder_cache.clear()
-        gc.collect()
+                output = None
+            self._sync_device()
+            del hidden_states, output
+            self.encoder_cache.clear()
+            gc.collect()
+        except Exception:
+            logger.exception("profile_run failed during dummy run")
+            raise
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (

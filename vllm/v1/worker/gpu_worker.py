@@ -361,24 +361,35 @@ class Worker(WorkerBase):
             logger.info(msg)
             return kv_cache_memory_bytes
 
-        # Execute a forward pass with dummy inputs to profile the memory usage
-        # of the model.
-        with memory_profiling(
-            self.init_snapshot,
-            weights_memory=int(self.model_runner.model_memory_usage),
-        ) as profile_result:
-            self.model_runner.profile_run()
+        try:
+            # Execute a forward pass with dummy inputs to profile the memory usage
+            # of the model.
+            with memory_profiling(
+                self.init_snapshot,
+                weights_memory=int(self.model_runner.model_memory_usage),
+            ) as profile_result:
+                self.model_runner.profile_run()
 
-            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
-                "allocated_bytes.all.peak", 0
-            )
+                profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
+                    "allocated_bytes.all.peak", 0
+                )
 
-            # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
-            # differently and can produce incorrect/negative estimates.
-            cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager and not current_platform.is_rocm():
-                cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+                # Profile CUDA graph memory if graphs will be captured.
+                # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+                # differently and can produce incorrect/negative estimates.
+                cudagraph_memory_estimate = 0
+                if (
+                    not self.model_config.enforce_eager
+                    and not current_platform.is_rocm()
+                    and self.vllm_config.compilation_config.cudagraph_mode
+                    != CUDAGraphMode.NONE
+                ):
+                    cudagraph_memory_estimate = (
+                        self.model_runner.profile_cudagraph_memory()
+                    )
+        except Exception:
+            logger.exception("determine_available_memory failed during profiling")
+            raise
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (
